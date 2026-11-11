@@ -9,11 +9,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import com.google.ai.client.generativeai.GenerativeModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -24,35 +28,36 @@ data class TimedLyric(
     val text: String
 )
 
-class HymnViewModel : ViewModel() {
+class HymnViewModel(context: Context) : ViewModel() {
+
+    private val dao = HymnDatabase.getDatabase(context).hymnDao()
+
+    val savedHymns: StateFlow<List<HymnEntity>> = dao.getAllHymns()
+        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
 
     var promptInput by mutableStateOf("")
-    var generatedLyrics by mutableStateOf("Your generated hymn will appear here...")
+    var generatedLyrics by mutableStateOf("Enter a theme above and tap Generate...")
     var isLoading by mutableStateOf(false)
 
     var isRecording by mutableStateOf(false)
     var isPlaying by mutableStateOf(false)
     var recordedFilePath: String? = null
 
-    // Synchronization state
     var currentPlaybackPosition by mutableLongStateOf(0L)
     private var playbackJob: Job? = null
 
-    // Sample synchronized lyric lines (Timed in milliseconds)
     var timedLyrics by mutableStateOf(
         listOf(
-            TimedLyric(0L, 5000L, "Verse 1: Amazing grace! how sweet the sound"),
-            TimedLyric(5001L, 10000L, "That saved a wretch like me!"),
-            TimedLyric(10001L, 15000L, "I once was lost, but now am found,"),
-            TimedLyric(15001L, 22000L, "Was blind, but now I see.")
+            TimedLyric(0L, 5000L, "Generated lyrics will appear here...")
         )
     )
 
     private var mediaRecorder: MediaRecorder? = null
     var audioPlayer: ExoPlayer? = null
 
+    // Using the stable flash-latest endpoint
     private val generativeModel = GenerativeModel(
-        modelName = "gemini-1.5-flash",
+        modelName = "gemini-1.5-flash-latest",
         apiKey = BuildConfig.GEMINI_API_KEY
     )
 
@@ -65,17 +70,53 @@ class HymnViewModel : ViewModel() {
             try {
                 val fullPrompt = "Write a traditional Christian church hymn with 3 verses and a chorus based on this theme: '$promptInput'. Use a poetic, reverent tone with an ABAB or AABB rhyme scheme."
                 val response = generativeModel.generateContent(fullPrompt)
-                generatedLyrics = response.text ?: "Could not generate lyrics."
+                val textResult = response.text ?: "Could not generate lyrics."
+                generatedLyrics = textResult
+                parseLyricsIntoTimedLines(textResult, 12000L)
             } catch (e: Exception) {
-                generatedLyrics = "Error: ${e.message}"
+                Log.e("HymnViewModel", "API Error", e)
+                generatedLyrics = "Error: ${e.localizedMessage ?: e.toString()}"
             } finally {
                 isLoading = false
             }
         }
     }
 
+    private fun parseLyricsIntoTimedLines(text: String, totalDurationMs: Long) {
+        val lines = text.lines().filter { it.isNotBlank() }
+        if (lines.isEmpty()) return
+
+        val durationPerLine = totalDurationMs / lines.size
+        timedLyrics = lines.mapIndexed { index, lineText ->
+            TimedLyric(
+                startMs = index * durationPerLine,
+                endMs = (index + 1) * durationPerLine,
+                text = lineText
+            )
+        }
+    }
+
+    fun saveHymn() {
+        val titleToSave = if (promptInput.isBlank()) "Worship Hymn" else promptInput
+
+        viewModelScope.launch {
+            val hymn = HymnEntity(
+                title = titleToSave,
+                lyrics = generatedLyrics,
+                audioPath = recordedFilePath
+            )
+            dao.insertHymn(hymn)
+        }
+    }
+
+    fun deleteHymn(hymn: HymnEntity) {
+        viewModelScope.launch {
+            dao.deleteHymn(hymn)
+        }
+    }
+
     fun startRecording(context: Context) {
-        val audioFile = File(context.filesDir, "hymn_recording.m4a")
+        val audioFile = File(context.filesDir, "hymn_${System.currentTimeMillis()}.m4a")
         recordedFilePath = audioFile.absolutePath
 
         mediaRecorder = MediaRecorder(context).apply {
@@ -102,27 +143,33 @@ class HymnViewModel : ViewModel() {
         isRecording = false
     }
 
-    fun playAudio(context: Context) {
-        if (recordedFilePath == null) return
+    fun playAudio(path: String?, lyricsToParse: String?, context: Context) {
+        val targetPath = path ?: recordedFilePath ?: return
+        val textToUse = lyricsToParse ?: generatedLyrics
 
         audioPlayer?.release()
         audioPlayer = ExoPlayer.Builder(context).build().apply {
-            val mediaItem = MediaItem.fromUri(recordedFilePath!!)
+            val mediaItem = MediaItem.fromUri(targetPath)
             setMediaItem(mediaItem)
             prepare()
             play()
         }
         isPlaying = true
 
-        // Start tracking playback position for lyric sync
         playbackJob?.cancel()
         playbackJob = viewModelScope.launch {
+            delay(300)
+            val trueDuration = audioPlayer?.duration ?: 0L
+            if (trueDuration > 0 && trueDuration != C.TIME_UNSET) {
+                parseLyricsIntoTimedLines(textToUse, trueDuration)
+            }
+
             while (isActive && isPlaying) {
                 currentPlaybackPosition = audioPlayer?.currentPosition ?: 0L
                 if (audioPlayer?.isPlaying == false && currentPlaybackPosition > 0) {
                     stopAudio()
                 }
-                delay(100) // Update every 100ms
+                delay(100)
             }
         }
     }
