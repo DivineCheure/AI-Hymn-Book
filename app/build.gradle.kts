@@ -30,6 +30,9 @@ android {
         val apiKey = localProperties.getProperty("GEMINI_API_KEY") ?: ""
         buildConfigField("String", "GEMINI_API_KEY", "\"$apiKey\"")
 
+        val elevenLabsKey = localProperties.getProperty("ELEVENLABS_API_KEY") ?: ""
+        buildConfigField("String", "ELEVENLABS_API_KEY", "\"$elevenLabsKey\"")
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -66,6 +69,10 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.media3.exoplayer)
     implementation(libs.androidx.media3.ui)
+
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    implementation("androidx.compose.material:material-icons-extended")
 
     // Room (local hymn database)
     implementation(libs.androidx.room.runtime)
